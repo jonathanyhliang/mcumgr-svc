@@ -13,7 +13,7 @@ import (
 
 func main() {
 	var (
-		httpAddr = flag.String("a", ":8080", "HTTP listen address")
+		httpAddr = flag.String("a", ":8081", "HTTP listen address")
 		port     = flag.String("p", "", "MCUMgr port")
 		baud     = flag.Int("b", 115200, "MCUMgr port baudrate")
 	)
