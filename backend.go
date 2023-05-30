@@ -42,7 +42,7 @@ var globalTxFilter nmcoap.TxMsgFilter
 var globalRxFilter nmcoap.RxMsgFilter
 
 type Backend interface {
-	Handler(port string, baud int) error
+	Handler(port string, baud int, url string) error
 	UploadImage(f string)
 	GetStatus() Status
 	Reset()
@@ -66,7 +66,7 @@ func NewMCUMgrBackend() Backend {
 	}
 }
 
-func (m *mcumgrBackend) Handler(port string, baud int) error {
+func (b *mcumgrBackend) Handler(port string, baud int, url string) error {
 	var s *serial.Port
 	c := &serial.Config{Name: port, Baud: baud, ReadTimeout: time.Second}
 	args := make([]string, 3)
@@ -79,78 +79,89 @@ func (m *mcumgrBackend) Handler(port string, baud int) error {
 	}
 
 	go func() {
-		m.msgQueueReceive()
+		b.msgQueueReceive(url)
 	}()
 
 	for {
 		select {
-		case f := <-m.upld:
+		case f := <-b.upld:
 			// To close the serial connection established when pinged by SLCAN service
 			if s != nil {
 				err = s.Close()
 				if err != nil {
 					return ErrBackendPortClose
 				}
+				s = nil
 			}
 			err = imageUploadCmd([]string{f})
-			m.mtx.Lock()
+			b.mtx.Lock()
 			if err != nil {
-				m.sta.Execution = "canceled"
-				m.sta.Result.Finished = "failure"
+				b.sta.Execution = "canceled"
+				b.sta.Result.Finished = "failure"
 			} else {
-				m.sta.Execution = "downloaded"
-				m.sta.Result.Finished = "success"
+				b.sta.Execution = "downloaded"
+				b.sta.Result.Finished = "success"
 			}
-			m.mtx.Unlock()
+			b.mtx.Unlock()
 
-		case <-m.rst:
+		case <-b.rst:
 			// To close the serial connection established when pinged by SLCAN service
 			if s != nil {
 				err = s.Close()
 				if err != nil {
 					return ErrBackendPortClose
 				}
+				s = nil
 			}
 			err = resetRunCmd([]string{})
 			if err != nil {
 
 			}
 			// Close opening serial port
+			time.Sleep(3 * time.Second)
 			cleanup()
 
-		case <-m.ping:
+		case <-b.ping:
 			// Establish serial connection as soon as pinged by SLCAN service
 			s, err = serial.OpenPort(c)
 			if err != nil {
 				return ErrBackendPortOpen
 			}
+			b.hold = false
+
 		default:
 		}
 	}
 }
 
-func (m *mcumgrBackend) UploadImage(f string) {
-	m.mtx.Lock()
-	m.sta.Execution = "download"
-	m.sta.Result.Finished = "none"
-	m.mtx.Unlock()
-	m.upld <- f
+func (b *mcumgrBackend) UploadImage(f string) {
+	if b.hold == true {
+		return
+	}
+	b.mtx.Lock()
+	b.sta.Execution = "download"
+	b.sta.Result.Finished = "none"
+	b.mtx.Unlock()
+	b.upld <- f
 	return
 }
 
-func (m *mcumgrBackend) GetStatus() Status {
-	m.mtx.Lock()
-	defer m.mtx.Unlock()
-	return m.sta
+func (b *mcumgrBackend) GetStatus() Status {
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
+	return b.sta
 }
 
-func (m *mcumgrBackend) Reset() {
-	m.rst <- true
+func (b *mcumgrBackend) Reset() {
+	if b.hold == true {
+		return
+	}
+	b.rst <- true
 	return
 }
 
-func (m *mcumgrBackend) msgQueueReceive() error {
-	conn, err := amqp.Dial("amqp://guest:guest@localhost:5672/")
+func (b *mcumgrBackend) msgQueueReceive(url string) error {
+	conn, err := amqp.Dial(url)
 	if err != nil {
 
 	}
@@ -189,8 +200,9 @@ func (m *mcumgrBackend) msgQueueReceive() error {
 
 	for {
 		for d := range msgs {
-			fmt.Printf("Backend: pinged with %s\n", d.Body)
-			m.ping <- true
+			if d.Body != nil {
+				b.ping <- true
+			}
 		}
 	}
 }

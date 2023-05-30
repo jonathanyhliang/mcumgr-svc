@@ -14,6 +14,7 @@ import (
 func main() {
 	var (
 		httpAddr = flag.String("a", ":8081", "HTTP listen address")
+		amqpURL  = flag.String("u", "amqp://guest:guest@localhost:5672/", "AMQP dialing address")
 		port     = flag.String("p", "", "MCUMgr port")
 		baud     = flag.Int("b", 115200, "MCUMgr port baudrate")
 	)
@@ -52,7 +53,7 @@ func main() {
 	}()
 
 	go func() {
-		errs <- b.Handler(*port, *baud)
+		errs <- b.Handler(*port, *baud, *amqpURL)
 	}()
 
 	go func() {
