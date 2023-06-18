@@ -1,106 +1,264 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io/ioutil"
 	"net/http"
+	"net/url"
+	"strings"
+	"time"
 
-	"github.com/gorilla/mux"
+	hawkbit "github.com/jonathanyhliang/hawkbit-fota/backend"
+	"github.com/sony/gobreaker"
+	"golang.org/x/time/rate"
 
+	"github.com/go-kit/kit/circuitbreaker"
+	"github.com/go-kit/kit/endpoint"
 	"github.com/go-kit/kit/log"
-	"github.com/go-kit/kit/transport"
+	"github.com/go-kit/kit/ratelimit"
+	"github.com/go-kit/kit/tracing/opentracing"
 	httptransport "github.com/go-kit/kit/transport/http"
+
+	stdopentracing "github.com/opentracing/opentracing-go"
 )
 
-var (
-	// ErrBadRouting is returned when an expected path variable is missing.
-	// It always indicates programmer error.
-	ErrBadRouting = errors.New("inconsistent mapping between route and handler (programmer error)")
-)
-
-func MakeHTTPHandler(s Service, logger log.Logger) http.Handler {
-	r := mux.NewRouter()
-	e := MakeServerEndpoints(s)
-	options := []httptransport.ServerOption{
-		httptransport.ServerErrorHandler(transport.NewLogErrorHandler(logger)),
-		httptransport.ServerErrorEncoder(encodeError),
+// NewHTTPClient returns an AddService backed by an HTTP server living at the
+// remote instance. We expect instance to come from a service discovery system,
+// so likely of the form "host:port". We bake-in certain middlewares,
+// implementing the client library pattern.
+func NewHTTPClient(instance string, otTracer stdopentracing.Tracer, logger log.Logger) (Service, error) {
+	// Quickly sanitize the instance string.
+	if !strings.HasPrefix(instance, "http") {
+		instance = "http://" + instance
+	}
+	u, err := url.Parse(instance)
+	if err != nil {
+		return nil, err
 	}
 
-	// POST	/mcumgr/upload		ploads image via MCUMgr
-	// GET	/mcumgr/status		retrieves image uploading status via MCUMgr
-	// POST /mcumgr/reset     	trigers cold reset
+	// We construct a single ratelimiter middleware, to limit the total outgoing
+	// QPS from this client to all methods on the remote instance. We also
+	// construct per-endpoint circuitbreaker middlewares to demonstrate how
+	// that's done, although they could easily be combined into a single breaker
+	// for the entire remote instance, too.
+	limiter := ratelimit.NewErroringLimiter(rate.NewLimiter(rate.Every(time.Second), 100))
 
-	r.Methods("POST").Path("/mcumgr/upload").Handler(httptransport.NewServer(
-		e.UploadImage,
-		decodeUploadImageEndpoint,
-		encodeResponse,
-		options...,
-	))
-	r.Methods("GET").Path("/mcumgr/status").Handler(httptransport.NewServer(
-		e.GetStatus,
-		decodeGetStatusEndpoint,
-		encodeResponse,
-		options...,
-	))
-	r.Methods("POST").Path("/mcumgr/reset").Handler(httptransport.NewServer(
-		e.Reset,
-		decodeResetEndpoint,
-		encodeResponse,
-		options...,
-	))
-	return r
-}
+	// global client middlewares
+	var options []httptransport.ClientOption
 
-func decodeUploadImageEndpoint(_ context.Context, r *http.Request) (request interface{}, err error) {
-	var img Image
-	if e := json.NewDecoder(r.Body).Decode(&img); e != nil {
-		return nil, e
+	// Each individual endpoint is an http/transport.Client (which implements
+	// endpoint.Endpoint) that gets wrapped with various middlewares. If you
+	// made your own client library, you'd do this work there, so your server
+	// could rely on a consistent set of client behavior.
+	var getControllerEndpoint endpoint.Endpoint
+	{
+		getControllerEndpoint = httptransport.NewClient(
+			"GET",
+			u,
+			encodeGetControllerRequest,
+			decodeGetControllerResponse,
+			append(options, httptransport.ClientBefore(opentracing.ContextToHTTP(otTracer, logger)))...,
+		).Endpoint()
+		getControllerEndpoint = opentracing.TraceClient(otTracer, "GetController")(getControllerEndpoint)
+		getControllerEndpoint = limiter(getControllerEndpoint)
+		getControllerEndpoint = circuitbreaker.Gobreaker(gobreaker.NewCircuitBreaker(gobreaker.Settings{
+			Name:    "GetController",
+			Timeout: 30 * time.Second,
+		}))(getControllerEndpoint)
 	}
-	return uploadImageRequest{Img: img}, nil
-}
-
-func decodeGetStatusEndpoint(_ context.Context, r *http.Request) (request interface{}, err error) {
-	return getStatusRequest{}, nil
-}
-
-func decodeResetEndpoint(_ context.Context, r *http.Request) (request interface{}, err error) {
-	return resetRequest{}, nil
-}
-
-type errorer interface {
-	error() error
-}
-
-func encodeResponse(ctx context.Context, w http.ResponseWriter, response interface{}) error {
-	if e, ok := response.(errorer); ok && e.error() != nil {
-		// Not a Go kit transport error, but a business-logic error.
-		// Provide those as HTTP errors.
-		encodeError(ctx, e.error(), w)
-		return nil
+	var putConfigDataEndpoint endpoint.Endpoint
+	{
+		putConfigDataEndpoint = httptransport.NewClient(
+			"PUT",
+			u,
+			encodePutConfigDataRequest,
+			decodePutConfigDataResponse,
+			append(options, httptransport.ClientBefore(opentracing.ContextToHTTP(otTracer, logger)))...,
+		).Endpoint()
+		putConfigDataEndpoint = opentracing.TraceClient(otTracer, "PutConfigData")(putConfigDataEndpoint)
+		putConfigDataEndpoint = limiter(putConfigDataEndpoint)
+		putConfigDataEndpoint = circuitbreaker.Gobreaker(gobreaker.NewCircuitBreaker(gobreaker.Settings{
+			Name:    "PutConfigData",
+			Timeout: 30 * time.Second,
+		}))(putConfigDataEndpoint)
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	return json.NewEncoder(w).Encode(response)
+	var getDeployBaseEndpoint endpoint.Endpoint
+	{
+		getDeployBaseEndpoint = httptransport.NewClient(
+			"GET",
+			u,
+			encodeGetDeployBaseRequest,
+			decodeGetDeployBaseResponse,
+			append(options, httptransport.ClientBefore(opentracing.ContextToHTTP(otTracer, logger)))...,
+		).Endpoint()
+		getDeployBaseEndpoint = opentracing.TraceClient(otTracer, "GetDeployBase")(getDeployBaseEndpoint)
+		getDeployBaseEndpoint = limiter(getDeployBaseEndpoint)
+		getDeployBaseEndpoint = circuitbreaker.Gobreaker(gobreaker.NewCircuitBreaker(gobreaker.Settings{
+			Name:    "GetDeployBase",
+			Timeout: 30 * time.Second,
+		}))(getDeployBaseEndpoint)
+	}
+	var postDeployBaseFeedbackEndpoint endpoint.Endpoint
+	{
+		postDeployBaseFeedbackEndpoint = httptransport.NewClient(
+			"POST",
+			u,
+			encodePostDeployBaseFeedbackRequest,
+			decodePostDeployBaseFeebackResponse,
+			append(options, httptransport.ClientBefore(opentracing.ContextToHTTP(otTracer, logger)))...,
+		).Endpoint()
+		postDeployBaseFeedbackEndpoint =
+			opentracing.TraceClient(otTracer, "PostDeployBaseFeedback")(postDeployBaseFeedbackEndpoint)
+		postDeployBaseFeedbackEndpoint = limiter(postDeployBaseFeedbackEndpoint)
+		postDeployBaseFeedbackEndpoint = circuitbreaker.Gobreaker(gobreaker.NewCircuitBreaker(gobreaker.Settings{
+			Name:    "PostDeployBaseFeedback",
+			Timeout: 30 * time.Second,
+		}))(postDeployBaseFeedbackEndpoint)
+	}
+	var getDownloadHttpEndpoint endpoint.Endpoint
+	{
+		getDownloadHttpEndpoint = httptransport.NewClient(
+			"GET",
+			u,
+			encodeGetDownloadHttpRequest,
+			decodeGetDownloadHttpResponse,
+			append(options, httptransport.ClientBefore(opentracing.ContextToHTTP(otTracer, logger)))...,
+		).Endpoint()
+		getDownloadHttpEndpoint =
+			opentracing.TraceClient(otTracer, "GetDownloadHttp")(getDownloadHttpEndpoint)
+		getDownloadHttpEndpoint = limiter(getDownloadHttpEndpoint)
+		getDownloadHttpEndpoint = circuitbreaker.Gobreaker(gobreaker.NewCircuitBreaker(gobreaker.Settings{
+			Name:    "GetDownloadHttp",
+			Timeout: 30 * time.Second,
+		}))(getDownloadHttpEndpoint)
+	}
+
+	// Returning the endpoint.Set as a Service relies on the
+	// Endpoints implementing the Service methods. That's just a simple bit
+	// of glue code.
+	return Endpoints{
+		GetControllerEndpoint:          getControllerEndpoint,
+		PutConfigDataEndpoint:          putConfigDataEndpoint,
+		GetDeployBaseEndpoint:          getDeployBaseEndpoint,
+		PostDeployBaseFeedbackEndpoint: postDeployBaseFeedbackEndpoint,
+		GetDownloadHttpEndpoint:        getDownloadHttpEndpoint,
+	}, nil
 }
 
-func encodeError(_ context.Context, err error, w http.ResponseWriter) {
-	if err == nil {
-		panic("encodeError with nil error")
-	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(codeFrom(err))
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"error": err.Error(),
-	})
+func copyURL(base *url.URL, path string) *url.URL {
+	next := *base
+	next.Path = path
+	return &next
 }
 
-func codeFrom(err error) int {
-	switch err {
-	case ErrImageNotfound:
-		return http.StatusNotFound
-	// case ErrDownloadImage:
-	// 	return http.StatusBadRequest
-	default:
-		return http.StatusInternalServerError
+func encodeGetControllerRequest(ctx context.Context, req *http.Request, request interface{}) error {
+	// r.Methods("GET").Path("/default/controller/v1/{bid}")
+	r := request.(hawkbit.GetControllerRequest)
+	bid := url.QueryEscape(r.Bid)
+	req.URL.Path = "/default/controller/v1/" + bid
+	return encodeRequest(ctx, req, nil)
+}
+
+func encodePutConfigDataRequest(ctx context.Context, req *http.Request, request interface{}) error {
+	// r.Methods("PUT").Path("/default/controller/v1/{bid}/configData")
+	r := request.(hawkbit.PutConfigDataRequest)
+	bid := url.QueryEscape(r.Bid)
+	req.URL.Path = "/default/controller/v1/" + bid + "/configData"
+	return encodeRequest(ctx, req, request)
+}
+
+func encodeGetDeployBaseRequest(ctx context.Context, req *http.Request, request interface{}) error {
+	// r.Methods("GET").Path("/default/controller/v1/{bid}/deploymentBase/{acid}")
+	r := request.(hawkbit.GetDeplymentBaseRequest)
+	bid := url.QueryEscape(r.Bid)
+	acid := url.QueryEscape(r.Acid)
+	req.URL.Path = "/default/controller/v1/" + bid + "/deploymentBase/" + acid
+	return encodeRequest(ctx, req, request)
+}
+
+func encodePostDeployBaseFeedbackRequest(ctx context.Context, req *http.Request, request interface{}) error {
+	// r.Methods("POST").Path("/default/controller/v1/{bid}/deploymentBase/{acid}/feedback")
+	r := request.(hawkbit.PostDeploymentBaseFeedbackRequest)
+	bid := url.QueryEscape(r.Bid)
+	acid := url.QueryEscape(r.Fb.ID)
+	req.URL.Path = "/default/controller/v1/" + bid + "/deploymentBase/" + acid + "/feedback"
+	return encodeRequest(ctx, req, request)
+}
+
+func encodeGetDownloadHttpRequest(ctx context.Context, req *http.Request, request interface{}) error {
+	// r.Methods("GET").Path("/DEFAULT/controller/v1/{bid}/softwareModules/{ver}")
+	r := request.(hawkbit.GetDownloadHttpRequest)
+	bid := url.QueryEscape(r.Bid)
+	ver := url.QueryEscape(r.Ver)
+	req.URL.Path = "/DEFAULT/controller/v1/" + bid + "/softwareModules/" + ver
+	return encodeRequest(ctx, req, request)
+}
+
+// encodeRequest likewise JSON-encodes the request to the HTTP request body.
+// Don't use it directly as a transport/http.Client EncodeRequestFunc:
+// profilesvc endpoints require mutating the HTTP method and request path.
+func encodeRequest(_ context.Context, req *http.Request, request interface{}) error {
+	var buf bytes.Buffer
+	err := json.NewEncoder(&buf).Encode(request)
+	if err != nil {
+		return err
 	}
+	req.Body = ioutil.NopCloser(&buf)
+	return nil
+}
+
+// decode?Response is a transport/http.DecodeResponseFunc that decodes a
+// JSON-encoded sum response from the HTTP response body. If the response has a
+// non-200 status code, we will interpret that as an error and attempt to decode
+// the specific error message from the response body. Primarily useful in a
+// client.
+func decodeGetControllerResponse(_ context.Context, r *http.Response) (interface{}, error) {
+	if r.StatusCode != http.StatusOK {
+		return nil, errors.New(r.Status)
+	}
+	var resp hawkbit.GetControllerResponse
+	err := json.NewDecoder(r.Body).Decode(&resp)
+	return resp, err
+}
+
+func decodePutConfigDataResponse(_ context.Context, r *http.Response) (interface{}, error) {
+	if r.StatusCode != http.StatusOK {
+		return nil, errors.New(r.Status)
+	}
+	var resp hawkbit.PutConfigDataResponse
+	err := json.NewDecoder(r.Body).Decode(&resp)
+	return resp, err
+}
+func decodeGetDeployBaseResponse(_ context.Context, r *http.Response) (interface{}, error) {
+	if r.StatusCode != http.StatusOK {
+		return nil, errors.New(r.Status)
+	}
+	var resp hawkbit.GetDeplymentBaseResponse
+	err := json.NewDecoder(r.Body).Decode(&resp)
+	return resp, err
+}
+
+func decodePostDeployBaseFeebackResponse(_ context.Context, r *http.Response) (interface{}, error) {
+	if r.StatusCode != http.StatusOK {
+		return nil, errors.New(r.Status)
+	}
+	var resp hawkbit.PostDeploymentBaseFeedbackResponse
+	err := json.NewDecoder(r.Body).Decode(&resp)
+	return resp, err
+}
+
+func decodeGetDownloadHttpResponse(_ context.Context, r *http.Response) (interface{}, error) {
+	if r.StatusCode != http.StatusOK {
+		return nil, errors.New(r.Status)
+	}
+	var resp hawkbit.GetDownloadHttpResponse
+	var err error
+	resp.File, err = ioutil.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+	return resp, err
 }

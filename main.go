@@ -1,19 +1,24 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
+	"time"
 
-	"github.com/go-kit/log"
+	"github.com/go-kit/kit/log"
+	hawkbit "github.com/jonathanyhliang/hawkbit-fota/backend"
+	stdopentracing "github.com/opentracing/opentracing-go"
 )
 
 func main() {
 	var (
-		httpAddr = flag.String("a", ":8081", "HTTP listen address")
+		httpAddr = flag.String("http-addr", "", "HTTP address of addsvc")
 		amqpURL  = flag.String("u", "amqp://guest:guest@localhost:5672/", "AMQP dialing address")
 		port     = flag.String("p", "", "MCUMgr port")
 		baud     = flag.Int("b", 115200, "MCUMgr port baudrate")
@@ -32,16 +37,17 @@ func main() {
 		b = NewMCUMgrBackend()
 	}
 
-	var s Service
+	// This is a demonstration client, which supports multiple tracers.
+	// Your clients will probably just use one tracer.
+	var otTracer stdopentracing.Tracer
 	{
-		s = NewMcumgrService()
-		s = BackendMiddleware(b)(s)
-		s = LoggingMiddleware(logger)(s)
+		otTracer = stdopentracing.GlobalTracer() // no-op
 	}
 
-	var h http.Handler
-	{
-		h = MakeHTTPHandler(s, log.With(logger, "component", "HTTP"))
+	svc, err := NewHTTPClient(*httpAddr, otTracer, log.NewNopLogger())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 
 	errs := make(chan error)
@@ -57,9 +63,105 @@ func main() {
 	}()
 
 	go func() {
-		logger.Log("transport", "HTTP", "addr", *httpAddr)
-		errs <- http.ListenAndServe(*httpAddr, h)
+		var ctrlr hawkbit.Controller
+		var cfgData hawkbit.ConfigData
+		var deployBase hawkbit.DeploymentBase
+		var deployBaseFdbk hawkbit.DeploymentBaseFeedback
+		var acid string = ""
+		var err error
+
+		for {
+			ctrlr, err = svc.GetController(context.Background(), "slcan-dev-5678")
+			if err != nil {
+				errs <- err
+			}
+
+			if ctrlr.Links.ConfigData.Href != "" {
+				cfgData.Data.HwRevision = "01"
+				cfgData.Data.VIN = "slcan-dev-5678"
+				cfgData.Mode = " merge"
+				err = svc.PutConfigData(context.Background(), "slcan-dev-5678", cfgData)
+				if err != nil {
+					errs <- err
+				}
+			}
+
+			if ctrlr.Links.DeploymentBase.Href != "" {
+				_, _acid := parseDeployBsaeHref(ctrlr.Links.DeploymentBase.Href)
+				if _acid != acid {
+					deployBase, err = svc.GetDeployBase(context.Background(), "slcan-dev-5678", _acid)
+					if err != nil {
+						errs <- err
+					}
+
+					if f := deployBase.Deployment.Chunks[0].Artifacts[0].Links.DownloadHttp.Href; f != "" {
+						_, ver := parseDownloadHttpHref(f)
+						err := b.UploadImage(svc.GetDownloadHttp(context.Background(),
+							"slcan-dev-5678", ver))
+						if err != nil {
+							errs <- err
+						}
+
+						for {
+							exec, result := b.GetStatus()
+							if exec == "closed" {
+								break
+							}
+							if result != "none" {
+								acid = _acid
+								b.Reset()
+								break
+							}
+						}
+					}
+
+					deployBaseFdbk.ID = _acid
+					deployBaseFdbk.Status.Execution, deployBaseFdbk.Status.Result.Finished = b.GetStatus()
+					err = svc.PostDeployBaseFeedback(context.Background(), "slcan-dev-5678", deployBaseFdbk)
+				}
+			}
+
+			time.Sleep(parseSleepTime(ctrlr.Config.Polling.Sleep))
+		}
 	}()
 
 	logger.Log("exit", <-errs)
+}
+
+func parseSleepTime(t string) time.Duration {
+	sleep := time.Duration(2) * time.Minute
+	n := strings.Split(t, ":")
+	if len(n) != 3 {
+		return sleep
+	}
+	ss, err := strconv.Atoi(n[2])
+	if err != nil {
+		return sleep
+	}
+	mm, err := strconv.Atoi(n[1])
+	if err != nil {
+		return sleep
+	}
+	hh, err := strconv.Atoi(n[0])
+	if err != nil {
+		return sleep
+	}
+	sleep = time.Duration(hh*3600+mm*60+ss) * time.Second
+	return sleep
+}
+
+func parseDeployBsaeHref(u string) (bid, acid string) {
+	n := strings.Split(u, "/")
+	if len(n) < 7 {
+		return "", ""
+	}
+	return n[4], n[6]
+}
+
+func parseDownloadHttpHref(u string) (bid, ver string) {
+	n := strings.Split(u, "/")
+	if len(n) < 7 {
+		return "", ""
+	}
+	return n[4], n[6]
 }

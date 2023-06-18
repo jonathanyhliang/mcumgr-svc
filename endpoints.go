@@ -3,70 +3,60 @@ package main
 import (
 	"context"
 
+	hawkbit "github.com/jonathanyhliang/hawkbit-fota/backend"
+
 	"github.com/go-kit/kit/endpoint"
 )
 
 type Endpoints struct {
-	UploadImage endpoint.Endpoint
-	GetStatus   endpoint.Endpoint
-	Reset       endpoint.Endpoint
+	GetControllerEndpoint          endpoint.Endpoint
+	PutConfigDataEndpoint          endpoint.Endpoint
+	GetDeployBaseEndpoint          endpoint.Endpoint
+	PostDeployBaseFeedbackEndpoint endpoint.Endpoint
+	GetDownloadHttpEndpoint        endpoint.Endpoint
 }
 
-func MakeServerEndpoints(s Service) Endpoints {
-	return Endpoints{
-		UploadImage: MakeUploadImage(s),
-		GetStatus:   MakeGetStatus(s),
-		Reset:       MakeReset(s),
+func (e Endpoints) GetController(ctx context.Context, bid string) (hawkbit.Controller, error) {
+	resp, err := e.GetControllerEndpoint(ctx, hawkbit.GetControllerRequest{Bid: bid})
+	if err != nil {
+		return hawkbit.Controller{}, err
 	}
+	response := resp.(hawkbit.GetControllerResponse)
+	return response.Ctrlr, response.Err
 }
 
-func MakeUploadImage(s Service) endpoint.Endpoint {
-	return func(ctx context.Context, request interface{}) (response interface{}, err error) {
-		req := request.(uploadImageRequest)
-		e := s.UploadImage(ctx, req.Img)
-		return uploadImageResponse{Err: e}, nil
+func (e Endpoints) PutConfigData(ctx context.Context, bid string, cfg hawkbit.ConfigData) error {
+	resp, err := e.PutConfigDataEndpoint(ctx, hawkbit.PutConfigDataRequest{Bid: bid, Cfg: cfg})
+	if err != nil {
+		return err
 	}
+	response := resp.(hawkbit.PutConfigDataResponse)
+	return response.Err
 }
 
-func MakeGetStatus(s Service) endpoint.Endpoint {
-	return func(ctx context.Context, request interface{}) (response interface{}, err error) {
-		_ = request.(getStatusRequest)
-		s, e := s.GetStatus(ctx)
-		return getStatusResponse{Sta: s, Err: e}, nil
+func (e Endpoints) GetDeployBase(ctx context.Context, bid, acid string) (hawkbit.DeploymentBase, error) {
+	resp, err := e.GetDeployBaseEndpoint(ctx, hawkbit.GetDeplymentBaseRequest{Bid: bid, Acid: acid})
+	if err != nil {
+		return hawkbit.DeploymentBase{}, nil
 	}
+	response := resp.(hawkbit.GetDeplymentBaseResponse)
+	return response.Dp, response.Err
 }
 
-func MakeReset(s Service) endpoint.Endpoint {
-	return func(ctx context.Context, request interface{}) (response interface{}, err error) {
-		_ = request.(resetRequest)
-		e := s.Reset(ctx)
-		return resetResponse{Err: e}, nil
+func (e Endpoints) PostDeployBaseFeedback(ctx context.Context, bid string, fb hawkbit.DeploymentBaseFeedback) error {
+	resp, err := e.PostDeployBaseFeedbackEndpoint(ctx, hawkbit.PostDeploymentBaseFeedbackRequest{Bid: bid, Fb: fb})
+	if err != nil {
+		return err
 	}
+	response := resp.(hawkbit.PostDeploymentBaseFeedbackResponse)
+	return response.Err
 }
 
-type uploadImageRequest struct {
-	Img Image
+func (e Endpoints) GetDownloadHttp(ctx context.Context, bid, ver string) []byte {
+	resp, err := e.GetDownloadHttpEndpoint(ctx, hawkbit.GetDownloadHttpRequest{Bid: bid, Ver: ver})
+	if err != nil {
+		return nil
+	}
+	response := resp.(hawkbit.GetDownloadHttpResponse)
+	return response.File
 }
-
-type uploadImageResponse struct {
-	Err error `json:"err,omitempty"`
-}
-
-func (r uploadImageResponse) error() error { return r.Err }
-
-type getStatusRequest struct{}
-
-type getStatusResponse struct {
-	Sta Status `json:"status,omitempty"`
-	Err error  `json:"err,omitempty"`
-}
-
-func (r getStatusResponse) error() error { return r.Err }
-
-type resetRequest struct{}
-
-type resetResponse struct {
-	Err error `json:"err,omitempty"`
-}
-
-func (r resetResponse) error() error { return r.Err }

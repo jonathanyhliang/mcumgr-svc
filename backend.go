@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"strings"
 	"sync"
 	"time"
@@ -19,8 +18,14 @@ import (
 	"mynewt.apache.org/newtmgr/nmxact/xport"
 
 	amqp "github.com/rabbitmq/amqp091-go"
-	"github.com/tarm/serial"
 )
+
+// http://www.dest-unreach.org/socat/doc/socat-ttyovertcp.txt
+// server (host)
+// socat tcp-l:port,reuseaddr,fork file:/dev/tty,nonblock,raw,echo=0,crnl,waitlock=/var/run/tty
+// clinet (svc)
+// docker run -ti --rm --add-host host.docker.internal:host-gateway alpine:latest
+// > socat pty,link=/dev/vmodem0,raw,echo=0,waitslave tcp:host.docker.internal:port
 
 var (
 	ErrBackendPortOpen  = errors.New("Backend: port open error")
@@ -43,32 +48,34 @@ var globalRxFilter nmcoap.RxMsgFilter
 
 type Backend interface {
 	Handler(port string, baud int, url string) error
-	UploadImage(f string)
-	GetStatus() Status
+	UploadImage(f []byte) error
 	Reset()
+	GetStatus() (exec, result string)
 }
 
 type mcumgrBackend struct {
-	upld chan string
+	upld chan bool
 	rst  chan bool
 	ping chan bool
+	img  []byte
 	mtx  sync.Mutex
-	sta  Status
-	hold bool
+	sta  struct {
+		exec   string
+		result string
+		mtx    sync.Mutex
+	}
 }
 
 func NewMCUMgrBackend() Backend {
 	return &mcumgrBackend{
-		upld: make(chan string),
+		upld: make(chan bool),
 		rst:  make(chan bool),
 		ping: make(chan bool),
-		hold: true,
 	}
 }
 
 func (b *mcumgrBackend) Handler(port string, baud int, url string) error {
-	var s *serial.Port
-	c := &serial.Config{Name: port, Baud: baud, ReadTimeout: time.Second}
+	b.setStatus("closed", "none")
 	args := make([]string, 3)
 	args[0] = "acm"
 	args[1] = "type=serial"
@@ -78,41 +85,20 @@ func (b *mcumgrBackend) Handler(port string, baud int, url string) error {
 		return err
 	}
 
+	b.mtx.Lock()
+
 	go func() {
 		b.msgQueueReceive(url)
 	}()
 
 	for {
 		select {
-		case f := <-b.upld:
-			// To close the serial connection established when pinged by SLCAN service
-			if s != nil {
-				err = s.Close()
-				if err != nil {
-					return ErrBackendPortClose
-				}
-				s = nil
-			}
-			err = imageUploadCmd([]string{f})
-			b.mtx.Lock()
-			if err != nil {
-				b.sta.Execution = "canceled"
-				b.sta.Result.Finished = "failure"
-			} else {
-				b.sta.Execution = "downloaded"
-				b.sta.Result.Finished = "success"
-			}
-			b.mtx.Unlock()
+		case <-b.upld:
+			b.setStatus("proceeding", "none")
+			// err = imageUploadCmd(b.img)
+			b.setStatus("downloaded", "success")
 
 		case <-b.rst:
-			// To close the serial connection established when pinged by SLCAN service
-			if s != nil {
-				err = s.Close()
-				if err != nil {
-					return ErrBackendPortClose
-				}
-				s = nil
-			}
 			err = resetRunCmd([]string{})
 			if err != nil {
 
@@ -120,44 +106,49 @@ func (b *mcumgrBackend) Handler(port string, baud int, url string) error {
 			// Close opening serial port
 			time.Sleep(3 * time.Second)
 			cleanup()
+			b.mtx.Unlock()
 
 		case <-b.ping:
 			// Establish serial connection as soon as pinged by SLCAN service
-			s, err = serial.OpenPort(c)
-			if err != nil {
-				return ErrBackendPortOpen
-			}
-			b.hold = false
+			fmt.Println("unlock")
+			b.mtx.Unlock()
 
 		default:
 		}
 	}
 }
 
-func (b *mcumgrBackend) UploadImage(f string) {
-	if b.hold == true {
-		return
+func (b *mcumgrBackend) UploadImage(f []byte) error {
+	if f == nil {
+		return ErrBackendImage
 	}
-	b.mtx.Lock()
-	b.sta.Execution = "download"
-	b.sta.Result.Finished = "none"
-	b.mtx.Unlock()
-	b.upld <- f
-	return
-}
+	fmt.Println("UploadImage")
+	if b.mtx.TryLock() {
+		fmt.Println("TryLock")
+		b.setStatus("scheduled", "none")
+		b.img = f
+		b.upld <- true
+	}
 
-func (b *mcumgrBackend) GetStatus() Status {
-	b.mtx.Lock()
-	defer b.mtx.Unlock()
-	return b.sta
+	return nil
 }
 
 func (b *mcumgrBackend) Reset() {
-	if b.hold == true {
-		return
-	}
 	b.rst <- true
 	return
+}
+
+func (b *mcumgrBackend) setStatus(exec, result string) {
+	b.sta.mtx.Lock()
+	b.sta.exec = exec
+	b.sta.result = result
+	defer b.sta.mtx.Unlock()
+}
+
+func (b *mcumgrBackend) GetStatus() (exec, result string) {
+	b.sta.mtx.Lock()
+	defer b.sta.mtx.Unlock()
+	return b.sta.exec, b.sta.result
 }
 
 func (b *mcumgrBackend) msgQueueReceive(url string) error {
@@ -244,20 +235,11 @@ func connProfileAddCmd(args []string) error {
 	return nil
 }
 
-func imageUploadCmd(args []string) error {
+func imageUploadCmd(img []byte) error {
 	noerase := false
 	imageNum := 0
 	upgrade := false
 	maxWinSz := xact.IMAGE_UPLOAD_DEF_MAX_WS
-
-	if len(args) < 1 {
-		return ErrBackendImage
-	}
-
-	imageFile, err := ioutil.ReadFile(args[0])
-	if err != nil {
-		return ErrBackendImage
-	}
 
 	s, err := getSesn()
 	if err != nil {
@@ -270,7 +252,7 @@ func imageUploadCmd(args []string) error {
 		Tries:   2,
 	}
 	c.SetTxOptions(opt)
-	c.Data = imageFile
+	c.Data = img
 	if noerase == true {
 		c.NoErase = true
 	}
@@ -279,7 +261,7 @@ func imageUploadCmd(args []string) error {
 	}
 	c.ImageNum = imageNum
 	c.Upgrade = upgrade
-	c.ProgressBar = pb.StartNew(len(imageFile))
+	c.ProgressBar = pb.StartNew(len(img))
 	c.ProgressBar.SetUnits(pb.U_BYTES)
 	c.ProgressBar.ShowSpeed = true
 	c.LastOff = 0
