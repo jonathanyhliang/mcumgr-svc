@@ -90,8 +90,8 @@ github.com/inconshreveable/mousetrap v1.0.1/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLf
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
 github.com/joaojeronimo/go-crc16 v0.0.0-20140729130949-59bd0194935e h1:LY29wmnTcSR92avOm1dW0LSjeE3d9Xnhm/mpGzMT/wc=
 github.com/joaojeronimo/go-crc16 v0.0.0-20140729130949-59bd0194935e/go.mod h1:+X++CLDTje8Yr7J4bGuUYx5LVbNpXPeO5ZLpI42hKVk=
-github.com/jonathanyhliang/hawkbit-fota v0.0.0-20230618023734-a359aae9904c h1:SFEew3EOKD6ukz78MmlWYo9+m4gdlsQDmM9CN7GRQ1A=
-github.com/jonathanyhliang/hawkbit-fota v0.0.0-20230618023734-a359aae9904c/go.mod h1:DYyXPiVhQvJSeHDaaKupA/5e1lf/aHAsWon41S7ZKd4=
+github.com/jonathanyhliang/hawkbit-fota v0.0.0-20230618113608-cea05c2727e6 h1:ME9zy1N2OkmKQyTuDAp216u/hFukCYsz7K4fAiy7QXY=
+github.com/jonathanyhliang/hawkbit-fota v0.0.0-20230618113608-cea05c2727e6/go.mod h1:DYyXPiVhQvJSeHDaaKupA/5e1lf/aHAsWon41S7ZKd4=
 github.com/josharian/intern v1.0.0 h1:vlS4z54oSdjm0bgjRigI+G1HpF+tI+9rE5LLzOg8HmY=
 github.com/josharian/intern v1.0.0/go.mod h1:5DoeVV0s6jJacbCEi61lwdGj/aVlrQvzHFFd8Hwg//Y=
 github.com/jtolds/gls v4.20.0+incompatible h1:xdiiI2gbIgH/gLH7ADydsJ1uDOEzR8yvV7C0MuV77Wo=

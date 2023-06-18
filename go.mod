@@ -4,7 +4,7 @@ go 1.19
 
 require (
 	github.com/go-kit/kit v0.12.0
-	github.com/jonathanyhliang/hawkbit-fota v0.0.0-20230618023734-a359aae9904c
+	github.com/jonathanyhliang/hawkbit-fota v0.0.0-20230618113608-cea05c2727e6
 	github.com/opentracing/opentracing-go v1.2.0
 	github.com/rabbitmq/amqp091-go v1.8.1
 	github.com/sony/gobreaker v0.4.1
