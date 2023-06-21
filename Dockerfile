@@ -1,6 +1,8 @@
-FROM golang:1.19
+FROM golang:alpine
 
-COPY . /root/mcumgr-svc
+RUN apk add socat
+
+COPY ../ /root/mcumgr-svc
 
 WORKDIR /root/mcumgr-svc
 

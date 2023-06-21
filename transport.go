@@ -232,6 +232,7 @@ func decodePutConfigDataResponse(_ context.Context, r *http.Response) (interface
 	err := json.NewDecoder(r.Body).Decode(&resp)
 	return resp, err
 }
+
 func decodeGetDeployBaseResponse(_ context.Context, r *http.Response) (interface{}, error) {
 	if r.StatusCode != http.StatusOK {
 		return nil, errors.New(r.Status)
