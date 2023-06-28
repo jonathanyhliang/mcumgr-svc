@@ -1,4 +1,4 @@
-package main
+package mcumgrsvc
 
 import (
 	"bytes"
@@ -29,7 +29,7 @@ import (
 // remote instance. We expect instance to come from a service discovery system,
 // so likely of the form "host:port". We bake-in certain middlewares,
 // implementing the client library pattern.
-func NewHTTPClient(instance string, otTracer stdopentracing.Tracer, logger log.Logger) (Service, error) {
+func NewHTTPClient(instance string, otTracer stdopentracing.Tracer, logger log.Logger) (IService, error) {
 	// Quickly sanitize the instance string.
 	if !strings.HasPrefix(instance, "http") {
 		instance = "http://" + instance

@@ -1,4 +1,4 @@
-package main
+package mcumgrsvc
 
 import (
 	"errors"
@@ -95,7 +95,7 @@ func (b *mcumgrBackend) Handler(port string, baud int, url string) error {
 		select {
 		case <-b.upld:
 			b.setStatus("proceeding", "none")
-			// err = imageUploadCmd(b.img)
+			err = imageUploadCmd(b.img)
 			b.setStatus("downloaded", "success")
 
 		case <-b.rst:
@@ -110,7 +110,6 @@ func (b *mcumgrBackend) Handler(port string, baud int, url string) error {
 
 		case <-b.ping:
 			// Establish serial connection as soon as pinged by SLCAN service
-			fmt.Println("unlock")
 			b.mtx.Unlock()
 
 		default:
@@ -122,9 +121,7 @@ func (b *mcumgrBackend) UploadImage(f []byte) error {
 	if f == nil {
 		return ErrBackendImage
 	}
-	fmt.Println("UploadImage")
 	if b.mtx.TryLock() {
-		fmt.Println("TryLock")
 		b.setStatus("scheduled", "none")
 		b.img = f
 		b.upld <- true

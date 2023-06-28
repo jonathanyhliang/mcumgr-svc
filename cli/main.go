@@ -13,12 +13,14 @@ import (
 
 	"github.com/go-kit/kit/log"
 	hawkbit "github.com/jonathanyhliang/hawkbit-fota/backend"
+	mcumgrsvc "github.com/jonathanyhliang/mcumgr-svc"
 	stdopentracing "github.com/opentracing/opentracing-go"
 )
 
 func main() {
 	var (
-		httpAddr = flag.String("http-addr", "", "HTTP address of addsvc")
+		bid      = flag.String("bid", "", "Board ID")
+		httpAddr = flag.String("s", "", "HTTP address of addsvc")
 		amqpURL  = flag.String("u", "amqp://guest:guest@localhost:5672/", "AMQP dialing address")
 		port     = flag.String("p", "", "MCUMgr port")
 		baud     = flag.Int("b", 115200, "MCUMgr port baudrate")
@@ -32,9 +34,9 @@ func main() {
 		logger = log.With(logger, "caller", log.DefaultCaller)
 	}
 
-	var b Backend
+	var b mcumgrsvc.Backend
 	{
-		b = NewMCUMgrBackend()
+		b = mcumgrsvc.NewMCUMgrBackend()
 	}
 
 	// This is a demonstration client, which supports multiple tracers.
@@ -44,10 +46,15 @@ func main() {
 		otTracer = stdopentracing.GlobalTracer() // no-op
 	}
 
-	svc, err := NewHTTPClient(*httpAddr, otTracer, log.NewNopLogger())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+	var svc mcumgrsvc.IService
+	{
+		var err error
+		svc, err = mcumgrsvc.NewHTTPClient(*httpAddr, otTracer, log.NewNopLogger())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		svc = mcumgrsvc.LoggingMiddleware(logger)(svc)
 	}
 
 	errs := make(chan error)
@@ -71,16 +78,16 @@ func main() {
 		var err error
 
 		for {
-			ctrlr, err = svc.GetController(context.Background(), "slcan-dev-5678")
+			ctrlr, err = svc.GetController(context.Background(), *bid)
 			if err != nil {
 				errs <- err
 			}
 
 			if ctrlr.Links.ConfigData.Href != "" {
 				cfgData.Data.HwRevision = "01"
-				cfgData.Data.VIN = "slcan-dev-5678"
+				cfgData.Data.VIN = *bid
 				cfgData.Mode = " merge"
-				err = svc.PutConfigData(context.Background(), "slcan-dev-5678", cfgData)
+				err = svc.PutConfigData(context.Background(), *bid, cfgData)
 				if err != nil {
 					errs <- err
 				}
@@ -89,7 +96,7 @@ func main() {
 			if ctrlr.Links.DeploymentBase.Href != "" {
 				_, _acid := parseDeployBsaeHref(ctrlr.Links.DeploymentBase.Href)
 				if _acid != acid {
-					deployBase, err = svc.GetDeployBase(context.Background(), "slcan-dev-5678", _acid)
+					deployBase, err = svc.GetDeployBase(context.Background(), *bid, _acid)
 					if err != nil {
 						errs <- err
 					}
@@ -97,7 +104,7 @@ func main() {
 					if f := deployBase.Deployment.Chunks[0].Artifacts[0].Links.DownloadHttp.Href; f != "" {
 						_, ver := parseDownloadHttpHref(f)
 						err := b.UploadImage(svc.GetDownloadHttp(context.Background(),
-							"slcan-dev-5678", ver))
+							*bid, ver))
 						if err != nil {
 							errs <- err
 						}
@@ -117,7 +124,7 @@ func main() {
 
 					deployBaseFdbk.ID = _acid
 					deployBaseFdbk.Status.Execution, deployBaseFdbk.Status.Result.Finished = b.GetStatus()
-					err = svc.PostDeployBaseFeedback(context.Background(), "slcan-dev-5678", deployBaseFdbk)
+					err = svc.PostDeployBaseFeedback(context.Background(), *bid, deployBaseFdbk)
 				}
 			}
 

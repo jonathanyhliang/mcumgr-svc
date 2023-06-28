@@ -1,4 +1,4 @@
-package main
+package mcumgrsvc
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	hawkbit "github.com/jonathanyhliang/hawkbit-fota/backend"
 )
 
-type Service interface {
+type IService interface {
 	GetController(ctx context.Context, bid string) (hawkbit.Controller, error)
 	PutConfigData(ctx context.Context, bid string, cfg hawkbit.ConfigData) error
 	GetDeployBase(ctx context.Context, bid, acid string) (hawkbit.DeploymentBase, error)
